@@ -1,0 +1,789 @@
+Description of the Full Code : 
+This code is running 6steps algorithm to run a BLDC motor with the help of hall sensors. 
+The speed request is taken from some ADC input, must there be a potentiometer on the eval board at pin P2.4.
+This code is running on Interrupts.
+1 - Main_HandleSysTick : This interrupt might be coming every 1msec. This timer increments the duty cycle of the PWM with a PID algorithm, which helps to attain the required speed. Input from potentiometer is read here only.
+2 - EmoCcu_HandleHallEvent : This interrupt comes at every correct/expected hall sensor combination is found. Here we turn on or off the MosFETs which are required for the next step as per the 6 step table. present speed calculation is done in this interrupt only.
+
+
+- It is to note that, the Sine wave is generated on the PWM pins and not on the Mosfet Driver Pins. : So BDRV register are not used in this code and are commented.
+
+
+
+Below values are generated from the GUI for Bridge Driver Configuration. These values might be only initial values and registers might get updated afterwards.
+--------------------------------------------------------------------------------
+#define BDRV_CP_CLK (0xE1) /*decimal 225*/
+
+#define BDRV_CP_CLK_CTRL (0xCA16) /*decimal 51734*/
+
+#define BDRV_CP_CLK_SRC (0x112A880) /*decimal 18000000*/
+
+#define BDRV_CP_CTRL_STS (0xC000001) /*decimal 201326593*/
+
+#define BDRV_CTRL1 (0x0) /*decimal 0*/
+
+#define BDRV_CTRL2 (0x0) /*decimal 0*/
+
+#define BDRV_CTRL3 (0x21111) /*decimal 135441*/
+
+#define BDRV_EFF_CRG_CURR (0x55) /*decimal 85*/
+
+#define BDRV_EFF_CRG_STEP1_CURR (0xA) /*decimal 10*/
+
+#define BDRV_EFF_CRG_STEP2_CURR (0xA) /*decimal 10*/
+
+#define BDRV_EFF_CRG_STEP3_CURR (0xA) /*decimal 10*/
+
+#define BDRV_EFF_CRG_STEP4_CURR (0xA) /*decimal 10*/
+
+#define BDRV_EFF_DISCRG_CURR (0x55) /*decimal 85*/
+
+#define BDRV_EFF_DISCRG_STEP1_CURR (0xA) /*decimal 10*/
+
+#define BDRV_EFF_DISCRG_STEP2_CURR (0xA) /*decimal 10*/
+
+#define BDRV_EFF_DISCRG_STEP3_CURR (0xA) /*decimal 10*/
+
+#define BDRV_EFF_DISCRG_STEP4_CURR (0xA) /*decimal 10*/
+
+#define BDRV_HSx_LSx_OC_DIS (0x0) /*decimal 0*/
+
+#define BDRV_LO_DITH (209.3)
+
+#define BDRV_LO_DITH_FREQ (0xD1) /*decimal 209*/
+
+#define BDRV_OFF_SEQ_CTRL (0x10101010) /*decimal 269488144*/
+
+#define BDRV_ON_SEQ_CTRL (0x10101010) /*decimal 269488144*/
+
+#define BDRV_TRIM_DRVx (0x20202) /*decimal 131586*/
+
+#define BDRV_UP_DITH (243.24)
+
+#define BDRV_UP_DITH_FREQ (0xF3) /*decimal 243*/
+
+#define MF_BEMFC_CTRL_STS (0x0) /*decimal 0*/
+
+#define MF_TRIM_BEMFx (0x4) /*decimal 4*/
+--------------------------------------------------------------------------------
+
+
+
+Below is the main function.
+--------------------------------------------------------------------------------
+
+int main(void)
+{
+  /* Initialization of hardware modules based on Config Wizard configuration */
+  TLE_Init();									//Definition Below : 
+  /* Initialize E-Motor application */
+  Emo_Init();
+  /* Start poti readout after Emo has been initialized */
+  ADC1_Ch4_Int_En();
+
+  for (;;)
+  {
+    /* Service watchdog */
+    (void)WDT1_Service();
+  }
+}
+
+--------------------------------------------------------------------------------
+
+
+
+
+--------------------------------------------------------------------------------
+void TLE_Init(void)
+{
+#ifdef RTE_DEVICE_SDK_SCU
+  SCU_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_PMU
+  PMU_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_ADC1
+  ADC1_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_ADC2
+  ADC2_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_ADC34
+  SDADC_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_BDRV
+  BDRV_Init();					//Definition Below.
+#endif
+#ifdef RTE_DEVICE_SDK_CCU6
+  CCU6_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_CSA
+  CSA_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_GPT12E
+  GPT12E_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_LIN
+  LIN_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_MON
+  MON_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_SSC
+  SSC1_Init();
+  SSC2_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_TIMER2X
+  TIMER2_Init();
+  TIMER21_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_TIMER3
+  TIMER3_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_UART
+  UART1_Init();
+  UART2_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_DMA
+  DMA_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_PORT
+  PORT_Init();
+#endif
+#ifdef RTE_DEVICE_SDK_INT
+  INT_Init();
+#endif
+}--------------------------------------------------------------------------------
+
+
+
+
+Below function sets the values from the above Macros generated from the GUI of BDRV.
+--------------------------------------------------------------------------------
+void BDRV_Init(void)
+{
+  /* Set charge pump clock */
+  BDRV->CP_CLK_CTRL.reg = (uint32) BDRV_CP_CLK_CTRL;
+  /* Set charge pump control, clear status bits */
+  BDRV->CP_CTRL_STS.reg = (uint32) BDRV_CP_CTRL_STS;
+  /* disable all interrupts                */
+  CMSIS_Irq_Dis();
+  /* Set trimming register */
+  SCU_OpenPASSWD();
+  BDRV->TRIM_DRVx.reg = (uint32) BDRV_TRIM_DRVx;
+  SCU_ClosePASSWD();
+  /* enable all interrupts                 */
+  CMSIS_Irq_En();
+  /* Set bridge driver control 1/2/3 */
+  BDRV->CTRL1.reg = (uint32) BDRV_CTRL1;
+  BDRV->CTRL2.reg = (uint32) BDRV_CTRL2;
+  BDRV->CTRL3.reg = (uint32) BDRV_CTRL3;
+#if (CONFIGWIZARD == 1)
+  BDRV->OFF_SEQ_CTRL.reg = (uint32) BDRV_OFF_SEQ;
+  BDRV->ON_SEQ_CTRL.reg = (uint32) BDRV_ON_SEQ;
+#else /* (CONFIGWIZARD == 2) */
+  BDRV->OFF_SEQ_CTRL.reg = (uint32) BDRV_OFF_SEQ_CTRL;
+  BDRV->ON_SEQ_CTRL.reg = (uint32) BDRV_ON_SEQ_CTRL;
+#endif
+#if (UC_SERIES == TLE987)
+  MF->BEMFC_CTRL_STS.reg = (uint32) MF_BEMFC_CTRL_STS;
+  MF->TRIM_BEMFx.reg = (uint32) MF_TRIM_BEMFx;
+#endif
+} /* End of BDRV_Init */
+--------------------------------------------------------------------------------
+
+
+
+
+--------------------------------------------------------------------------------
+void BDRV_Set_Bridge(TBdrv_Ch_Cfg LS1_Cfg, TBdrv_Ch_Cfg HS1_Cfg,
+                     TBdrv_Ch_Cfg LS2_Cfg, TBdrv_Ch_Cfg HS2_Cfg, TBdrv_Ch_Cfg LS3_Cfg,
+                     TBdrv_Ch_Cfg HS3_Cfg)
+{
+  Field_Mod32(&BDRV->CTRL1.reg, BDRV_CTRL1_LS1_Cfg_Pos, BDRV_CTRL1_LS1_Cfg_Msk, (uint32)LS1_Cfg);
+  Field_Mod32(&BDRV->CTRL1.reg, BDRV_CTRL1_HS1_Cfg_Pos, BDRV_CTRL1_HS1_Cfg_Msk, (uint32)HS1_Cfg);
+  Field_Mod32(&BDRV->CTRL1.reg, BDRV_CTRL1_LS2_Cfg_Pos, BDRV_CTRL1_LS2_Cfg_Msk, (uint32)LS2_Cfg);
+  Field_Mod32(&BDRV->CTRL1.reg, BDRV_CTRL1_HS2_Cfg_Pos, BDRV_CTRL1_HS2_Cfg_Msk, (uint32)HS2_Cfg);
+  Field_Mod32(&BDRV->CTRL2.reg, BDRV_CTRL2_LS3_Cfg_Pos, BDRV_CTRL2_LS3_Cfg_Msk, (uint32)LS3_Cfg);
+  Field_Mod32(&BDRV->CTRL2.reg, BDRV_CTRL2_HS3_Cfg_Pos, BDRV_CTRL2_HS3_Cfg_Msk, (uint32)HS3_Cfg);
+}
+--------------------------------------------------------------------------------
+
+
+
+--------------------------------------------------------------------------------
+uint32 Emo_Init(void)
+{
+  if (Emo_Status.MotorState != EMO_MOTOR_STATE_UNINIT)
+  {
+    /* Error detected: return with error */
+    return EMO_ERROR_MOTOR_INIT;
+  }
+
+  /* Switch on VDDEXT */
+  PMU->VDDEXT_CTRL.reg = 0x01u;
+  /* Initialize Hall parameters */
+  EmoCcu_InitHallPar();
+  /* Initialize parameters */
+  Emo_lInitPar();
+  /* Initialize motor state */
+  Emo_Status.MotorState = EMO_MOTOR_STATE_STOP;
+  /* Return without error */
+  return EMO_ERROR_NONE;
+} /* End of Emo_Init */
+--------------------------------------------------------------------------------
+
+
+
+
+ADC interrupt is being called and the motor control function is getting called inside it. ADC will be called after the conversion automatically.
+--------------------------------------------------------------------------------
+void Poti_Handler(void)
+{
+  uint16 mV;
+
+  /* Read the value at Ch4 (Poti) in mV - values between 0 and 5000 are possible */
+  if (ADC1_GetChResult_mV(&mV, ADC1_CH4) == true)
+  {
+    Emo_SetRefSpeed(mV / 2);
+
+    if (mV > 100)
+    {
+      Main_lStartMotor();			// Definition below : Start the motor in 1 direction.
+      PORT_P01_Output_High_Set();
+    }
+    else
+    {
+      Main_lStopMotor();			// Definition below : Stop the motor.
+      PORT_P01_Output_Low_Set();
+    }
+  }
+}
+--------------------------------------------------------------------------------
+
+
+
+
+--------------------------------------------------------------------------------
+static void Main_lStartMotor(void)
+{
+  uint32 Error;
+  Error = EMO_ERROR_NONE;		// "EMO_ERROR_NONE" is 0.
+
+  if (Error == EMO_ERROR_NONE)
+  {
+    /* Start motor with desired positive or negative speed in [rpm] */
+    Error = Emo_StartMotor();				// 
+  }
+
+  if (Error == EMO_ERROR_NONE)
+  {
+  }
+  else /* Error */
+  {
+  }
+}
+--------------------------------------------------------------------------------
+
+
+
+
+--------------------------------------------------------------------------------
+uint32 Emo_StartMotor(void)
+{
+  if (Emo_Status.MotorState != EMO_MOTOR_STATE_STOP)
+  {
+    /* Error detected: return with error */
+    return EMO_ERROR_MOTOR_NOT_STOPPED;
+  }
+
+  /* Start PWM */
+  Ccu6_Start();								//Definition below : This is from Infineon drivers, which helps to start the PWM 									//using CCU6.	
+  /* Enable bridge (after starting PWM according to UM) */
+  BDRV_Set_Bridge(Ch_PWM, Ch_PWM, Ch_PWM, Ch_PWM, Ch_PWM, Ch_PWM);	//This is an important driver level function which helps us to start the PWM signal 									//on the Mosfet driver. This is enabled after enabling the driver.
+  /* Initialize variables */
+  Emo_lInitVar();
+  /* Initialize Hall variables */
+  EmoCcu_InitHallVar();
+  /* Set start state */
+  Emo_Status.MotorState = EMO_MOTOR_STATE_START;
+  /* Return without error */
+  return EMO_ERROR_NONE;
+} /* End of Emo_StartMotor */
+--------------------------------------------------------------------------------
+
+
+
+This is from Infineon drivers, which helps to start the PWM using CCU6.
+--------------------------------------------------------------------------------
+void Ccu6_Start(void)
+{
+  uint32 HallOutPtn;
+  uint16 InitDutyCycle;
+  uint32 CurrentHallPtn;
+  uint32 ExpHallPtn;
+  /* Set common duty cycle */
+  InitDutyCycle = (uint16)((((uint32)BCHALL_INIT_DUTY) * EMO_PWM_PERIOD_TICKS) / 100);
+  CCU6_LoadShadowRegister_CC60(InitDutyCycle);
+  CCU6_LoadShadowRegister_CC61(InitDutyCycle);
+  CCU6_LoadShadowRegister_CC62(InitDutyCycle);
+  /* Timer13 triggers the HALL pattern evaluation, wait 50µs until TIMER13 triggers HALL evaluation */
+  Delay_us(100u);
+  /* Get current Hall pattern */
+  CurrentHallPtn = CCU6_ReadHallReg();
+  /* Set current/next T12MODEN and MCMEN in CCU60_MODCTR */
+  CCU6_ConfigureGlobalModulation((uint16)EmoCcu_Cfg.T12Moden[CurrentHallPtn + EmoCcu_HallStatus.DirIdx]);
+  /* Get current Hall and output patterns from table */
+  HallOutPtn = EmoCcu_Cfg.HallOutPtns[CurrentHallPtn + EmoCcu_HallStatus.DirIdx];
+  /* Set current Hall and output patterns immediately in MCMOUT */
+  CCU6_WriteMultichannelPatterns((uint16)(HallOutPtn | CCU6_MASK_MCMOUTS_SHADOW_OUT | CCU6_MASK_MCMOUTS_SHADOW_HALL));
+  /* Prepare next Hall and output patterns in CCU6_MCMOUTS */
+  ExpHallPtn = (HallOutPtn >> 8u) & 0x7u;
+  CCU6_WriteMultichannelPatterns(EmoCcu_Cfg.HallOutPtns[ExpHallPtn + EmoCcu_HallStatus.DirIdx]);
+  /* Set Multi-Channel Mode Control register for switching on correct Hall pattern */
+  CCU6_ConfigureMultichannelModulation((uint16)Ccu6_lSetMCMCTR
+                                       (
+                                         1, /* SWSEL Switching Selection(3 Bits):
+        * 0=No trigger request, 1=Correct Hall pattern, 2=T13 period match, 3=T12 one match,
+        * 4=T12 channel 1 compare match, 5=T12 period match, 6..7=reserved */
+                                         0, /* SWSYN Switching Synchronization(2 Bits):
+        * 0=Direct, 1=T13 zero-match, 2=T12 zero-match (while counting up), 3=reserved */
+                                         0, /* STE12U Shadow Transfer Enable for T12 Upcounting:
+        * 1=Enable transfer for T12 upcounting and MCMEN=1 */
+                                         0, /* STE12D Shadow Transfer Enable for T12 Downcounting:
+        * 1=Enable transfer for T12 downcounting and MCMEN=1 */
+                                         0  /* STE13U Shadow Transfer Enable for T13 Upcounting:
+        * 1=Enable transfer for T13 upcounting and MCMEN=1 */
+                                       ));
+  /* Start timer 3 */
+  GPT12E_T3_Start();
+  /* Clear status bits, enable interrupt for Hall event only */
+  CCU6_ClearIntStatus(CCU6_MASK_INT_CHE);
+  CCU6_EnableInt(CCU6_MASK_INT_CHE);
+  /* Start T12, enable shadow transfer for T12 and T13 */
+  CCU6_SetT12T13ControlBits((uint16)(CCU6_MASK_TCTR4_START_T12 | CCU6_MASK_TCTR4_SHADOW_T12 | CCU6_MASK_TCTR4_SHADOW_T13));
+} /* End of Ccu6_Start */
+--------------------------------------------------------------------------------
+
+
+
+
+//This is an important driver level function which helps us to start the PWM signal on the Mosfet driver.
+--------------------------------------------------------------------------------
+void BDRV_Set_Bridge(TBdrv_Ch_Cfg LS1_Cfg, TBdrv_Ch_Cfg HS1_Cfg,
+                     TBdrv_Ch_Cfg LS2_Cfg, TBdrv_Ch_Cfg HS2_Cfg, TBdrv_Ch_Cfg LS3_Cfg,
+                     TBdrv_Ch_Cfg HS3_Cfg)
+{
+  Field_Mod32(&BDRV->CTRL1.reg, BDRV_CTRL1_LS1_Cfg_Pos, BDRV_CTRL1_LS1_Cfg_Msk, (uint32)LS1_Cfg);
+  Field_Mod32(&BDRV->CTRL1.reg, BDRV_CTRL1_HS1_Cfg_Pos, BDRV_CTRL1_HS1_Cfg_Msk, (uint32)HS1_Cfg);
+  Field_Mod32(&BDRV->CTRL1.reg, BDRV_CTRL1_LS2_Cfg_Pos, BDRV_CTRL1_LS2_Cfg_Msk, (uint32)LS2_Cfg);
+  Field_Mod32(&BDRV->CTRL1.reg, BDRV_CTRL1_HS2_Cfg_Pos, BDRV_CTRL1_HS2_Cfg_Msk, (uint32)HS2_Cfg);
+  Field_Mod32(&BDRV->CTRL2.reg, BDRV_CTRL2_LS3_Cfg_Pos, BDRV_CTRL2_LS3_Cfg_Msk, (uint32)LS3_Cfg);
+  Field_Mod32(&BDRV->CTRL2.reg, BDRV_CTRL2_HS3_Cfg_Pos, BDRV_CTRL2_HS3_Cfg_Msk, (uint32)HS3_Cfg);
+}
+--------------------------------------------------------------------------------
+
+
+
+//This function sets the PID variable to 0.
+--------------------------------------------------------------------------------
+static void Emo_lInitVar(void)
+{
+  Emo_Ctrl.SpeedPi.IOut = 0;					// Reseting all the Speed PID variables.
+  Emo_Ctrl.DutyCycle = 0u;					// DutyCycle is reset to 0.
+} /* End of Emo_lInitVar */
+--------------------------------------------------------------------------------
+
+
+
+
+--------------------------------------------------------------------------------
+static void Main_lStopMotor(void)
+{
+  uint32 Error;
+  Error = Emo_StopMotor();					// Definition below : Below function is used to stop the motor rotation.
+
+  if (Error != EMO_ERROR_NONE)
+  {
+  }
+}
+--------------------------------------------------------------------------------
+
+
+Below function is used to stop the motor rotation.
+--------------------------------------------------------------------------------
+uint32 Emo_StopMotor(void)
+{
+  if (Emo_Status.MotorState < EMO_MOTOR_STATE_START)
+  {
+    /* Error detected: return with error */
+    return EMO_ERROR_MOTOR_NOT_STARTED;
+  }
+
+  /* Disable bridge */
+  BDRV_Set_Bridge(Ch_Off, Ch_Off, Ch_Off, Ch_Off, Ch_Off, Ch_Off);		// All Bridge Drivers are turned off.
+  /* Stop PWM */
+  Ccu6_Stop();									// CCU6 PWM is stopped. This is the sequence to turn off the Mosfet Drivers.
+  /* Initialize bridge */
+  BDRV_Init();									// Bridge driver is again initiated.
+  /* Set stop state */
+  Emo_Status.MotorState = EMO_MOTOR_STATE_STOP;					// Motor state is turned off.
+  /* Return without error */
+  return EMO_ERROR_NONE;
+} /* End of Emo_StopMotor */
+--------------------------------------------------------------------------------
+
+
+
+
+
+Below is another interrupt function, which might be helping to rotate the motor.
+--------------------------------------------------------------------------------
+void EmoCcu_HandleHallEvent(void)
+{
+  uint32 ExpHallPtn;
+  uint32 CurrentHallPtn;
+  uint32 HallPtn;
+  uint16 DiffTime;
+  uint16 Speed;
+  uint16 Time;
+  uint16 DelayTime;
+  /* Set current/next T12MODEN and MCMEN in CCU60_MODCTR */
+MCMOUT register value is returned.
+  HallPtn = (uint32)(CCU6_ReadMultichannelPatterns() >> 8u);				// Reading register(MCMOUT) values which contains Mosfet states and 											// Hall Sensor States and shifting it with 8 values to right.
+
+  CurrentHallPtn = HallPtn >> 3u;							// It looks they are trying to get the current hall pattern. Present 											// hall Sensor value is at bit 11,12,13. Shifting 8+3 will provide 											// its value.
+
+  CCU6_ConfigureGlobalModulation((uint16)EmoCcu_Cfg.T12Moden[CurrentHallPtn + EmoCcu_HallStatus.DirIdx]);	// Definition below. This function enables 														// which Mosfets will remain connected with 														// CCU6/PWM output and which will not based 														// on the hall pattern using register 															// "MODCTR"
+  /* Prepare next Hall patterns and output pattern */
+  ExpHallPtn = HallPtn & 0x7u;								// Fetching the Hall Pattern from the variable and removing other 											// values.
+  
+  CCU6_WriteMultichannelPatterns(EmoCcu_Cfg.HallOutPtns[ExpHallPtn + EmoCcu_HallStatus.DirIdx]);	// Definition below : Below function writes to the 													// shadow register which writes in the "expected 													// Hall sensor values" for the next cycles and PWM 													// enabling shadow register, which Output needs to 													// be connected to the CCU6(PWM) output.
+
+  Time = GPT12E_T3_Value_Get();										// This is the values of another free running timer 													// used to get time value
+
+  if (EmoCcu_HallStatus.StartCtr < 255u)								// Some counter value is checked with maximum value.
+  {
+    /* Increment start counter */
+    EmoCcu_HallStatus.StartCtr++;									// Counter is incremented at every hall interrupt.
+  }
+
+  if (EmoCcu_HallStatus.StartCtr == 1u)									// If counter was incremented for the first time.
+  {
+    /* Start: */											// Do nothing.
+    /* Do not calculate difference time and speed */
+  }
+  else
+  {
+    /* Calculate difference time */
+    DiffTime = Time - EmoCcu_HallStatus.EventTime;							// getting the time difference from last time when 													// hall interrupt came.
+    /* Calculate speed */
+    Speed = (uint16)(SPEED_FROM_COMM_PERIOD_NUM / DiffTime);						// Calculating the speed from the Time difference.
+    EmoCcu_HallStatus.Speed = Speed;									// updating speed in structure variable.
+
+    if (EmoCcu_HallStatus.StartCtr == 2u)								// If counter was 2
+    {
+      /* Initialize average speed */
+      EmoCcu_HallStatus.Speed = Mat_ExeSimpleLp(&EmoCcu_HallStatus.SpeedLong, Speed, 65535u);		// Definition below : We are updating the speed of 													// with low pass filter in the structure variable.
+      /* Set run mode */
+      Emo_SetMotorState(EMO_MOTOR_STATE_RUN);								// This function just updates the state of Motor 													// State to RUN
+    }
+    else /* (EmoCcu_HallStatus.StartCtr >= 2u) */							// If the counter value is more than 2.
+    {
+      /* Calculate average speed */
+      EmoCcu_HallStatus.Speed = Mat_ExeSimpleLp(&EmoCcu_HallStatus.SpeedLong, Speed, POS_SPEED_LP_COEF);	// Again the this function provides rounded 														// off average speed.  
+    }
+
+    if (Speed >= EmoCcu_HallStatus.DelayMinSpeed)							// If speed is greater than the minimum speed.
+    {
+      /* Minimum speed reached: */
+      /* Set T13 period to Hall delay time, limit to minimum = Hall filter time */			 
+      DelayTime = (uint16)(((((uint32)DiffTime) * EmoCcu_HallStatus.DelayAngle) + 30u) / 60u);		// If there is a hall angle delay, it can be 														// compensated here.
+
+      if (DelayTime < T13_HALL_FILTER_TIME_TICKS)							// if Delay is less than Time Period of T13
+      {
+        DelayTime = T13_HALL_FILTER_TIME_TICKS;								// Delay time becomes equal to Time period of T13,													// Note : T13 timer is not 3 PWM timer, T12 is 3 PWM 													// timer.
+      }
+
+      CCU6_LoadPeriodRegister_T13_Tick(DelayTime);			// Defition below : We are setting the period of T13 Timer 												// with Delay time.
+							
+      CCU6_EnableST_T13();						// Definition below : This function requests shadow transfer 												// of the T13 Timer Time Period.
+      EmoCcu_HallStatus.DelayTime = DelayTime;				// Delay time is copied in the Structure delay time.
+    }
+  }
+
+  EmoCcu_HallStatus.EventTime = Time;					// The time when this interrupt occurred is saved in structure time. 
+} /* End of EmoCcu_HandleHallEvent */
+--------------------------------------------------------------------------------
+
+
+
+This is an inline function, which is very useful for reading hall sensor values.
+--------------------------------------------------------------------------------
+INLINE uint16 CCU6_ReadMultichannelPatterns(void)
+{
+  return u16_Field_Rd16(&CCU6->MCMOUT.reg, 0, (uint16)0xFFFF);		// Function Description below. : MCMOUT register value is returned.
+}
+--------------------------------------------------------------------------------
+
+
+This function is used to read any register and helps to shift its value if required by pos(2nd argument). It returns the read value.
+--------------------------------------------------------------------------------
+INLINE uint16 u16_Field_Rd16(const volatile uint16 *reg, uint16 pos, uint16 msk)
+{
+  return ((*reg & msk) >> pos);
+}
+--------------------------------------------------------------------------------
+
+
+This function writes the argument value of Register "MODCTR". 
+The Mosfets are opened with respect to the present hall pattern.
+--------------------------------------------------------------------------------
+CCU6_ConfigureGlobalModulation((uint16)EmoCcu_Cfg.T12Moden[CurrentHallPtn + EmoCcu_HallStatus.DirIdx]);
+
+INLINE void CCU6_ConfigureGlobalModulation(uint16 Mode)
+{
+  Field_Wrt16(&CCU6->MODCTR.reg, 0, (uint16)0xFFFF, Mode);
+}
+--------------------------------------------------------------------------------
+
+
+Below function writes to the shadow register which writes in the "expected Hall sensor values" for the next cycles and PWM enabling shadow register, which Output needs to be connected to the CCU6(PWM) output.
+Additional Note : We can turn off the PWM of specific outputs as per our 6 Step logics.
+--------------------------------------------------------------------------------
+CCU6_WriteMultichannelPatterns(EmoCcu_Cfg.HallOutPtns[ExpHallPtn + EmoCcu_HallStatus.DirIdx]);
+
+INLINE void CCU6_WriteMultichannelPatterns(uint16 Patterns)
+{
+  Field_Wrt16(&CCU6->MCMOUTS.reg, 0, (uint16)0xFFFF, Patterns);
+}
+--------------------------------------------------------------------------------
+
+
+
+This function is a low pass filter which taken input of 16bit, and with the help of a factor it gives a 32bit value.
+This function is providing the round off speed.
+--------------------------------------------------------------------------------
+EmoCcu_HallStatus.Speed = Mat_ExeSimpleLp(&EmoCcu_HallStatus.SpeedLong, Speed, POS_SPEED_LP_COEF);
+
+uint16 Mat_ExeSimpleLp(uint32 *pOutput, uint16 Input, uint16 Fac)
+{
+  uint32 NegFac;
+  uint32 Out;
+  Out = *pOutput;
+  /* Output = output - output * factor */
+  NegFac = 0x10000u - (uint32)Fac;
+  Out = (((Out & 0xFFFFu) * NegFac) >> 16u) + ((Out >> 16u) * NegFac);
+  /* Output += input * factor */
+  Out += (uint32)Input * (uint32)Fac;
+  /* Store output */
+  *pOutput = Out;
+  /* Return upper rounded part */
+  return (uint16)((Out + 0x8000u) >> 16u);
+}
+--------------------------------------------------------------------------------
+
+
+
+This function sets the Period of the T13 timer.
+--------------------------------------------------------------------------------
+INLINE void CCU6_LoadPeriodRegister_T13_Tick(uint16 tick)
+{
+  CCU6_T13_Period_Value_Set(tick);			//Definition below : This function sets the T13 timer at the register level.
+}
+--------------------------------------------------------------------------------
+
+
+
+This function sets the T13 timer at the register level.
+--------------------------------------------------------------------------------
+INLINE void CCU6_T13_Period_Value_Set(uint16 t13pr)
+{
+  Field_Wrt16(&CCU6->T13PR.reg, (uint16)CCU6_T13PR_T13PV_Pos, (uint16)CCU6_T13PR_T13PV_Msk, t13pr);
+}
+--------------------------------------------------------------------------------
+
+
+This function requests shadow transfer of the T13 Timer Time Period.
+--------------------------------------------------------------------------------
+INLINE void CCU6_EnableST_T13(void)
+{
+  CCU6_T13_Str_En();				//Definition below. : This function writes the "TCTR4" register with value 1 at the 14th position. This will 						//request the shadow transfer of the T13 Timer of the CCU6 unit. 
+}
+--------------------------------------------------------------------------------
+
+
+
+This function writes the "TCTR4" register with value 1 at the 14th position. This will request the shadow transfer of the T13 Timer of the CCU6 unit. 
+Note : T13 does not have 3 PWM output, but only a single output.3 PWM output timer is T12.
+--------------------------------------------------------------------------------
+INLINE void CCU6_T13_Str_En(void)
+{
+  Field_Wrt16(&CCU6->TCTR4.reg, (uint16)CCU6_TCTR4_T13STR_Pos, (uint16)CCU6_TCTR4_T13STR_Msk, 1u);		// Definition below :  																	// "CCU6_TCTR4_T13STR_Pos" value is 14
+														// "CCU6_TCTR4_T13STR_Msk" value is 0x4000UL
+}
+--------------------------------------------------------------------------------
+
+
+
+This function helps to write any register(first argument), with a value "val"(fourth argument). It is also possible to mask specific values using the 3rd argument. It is also possible to shift the value left shift the value using the 2nd argument.
+Note : First shifting will be done then masking will happen.
+--------------------------------------------------------------------------------
+INLINE void Field_Wrt16(volatile uint16 *reg, uint16 pos, uint16 msk, uint16 val)
+{
+  (*reg = (uint16)((uint32)val << pos) & (uint16)msk);
+}
+--------------------------------------------------------------------------------
+
+
+
+
+--------------------------------------------------------------------------------
+void Main_HandleSysTick(void)
+{
+  /* Callback function executed every ms for speed control */
+  Emo_CtrlSpeed();
+}
+--------------------------------------------------------------------------------
+
+
+
+--------------------------------------------------------------------------------
+void Emo_CtrlSpeed(void)
+{
+  uint16 DutyCycle;							// Create a variable for DutyCycle
+
+  if (Emo_Status.MotorState == EMO_MOTOR_STATE_RUN)			// If the motor state is run.
+  {
+    /* Perform speed control */
+    DutyCycle = (uint16)Mat_ExePi(&Emo_Ctrl.SpeedPi, Emo_Ctrl.UserRefSpeed - (sint16)Emo_GetAbsSpeed());	// Generate duty based on PID.
+    /* Set new common duty cycle immediately */
+    CCU6_LoadShadowRegister_CC60(DutyCycle);				// Definition below.
+    CCU6_LoadShadowRegister_CC61(DutyCycle);
+    CCU6_LoadShadowRegister_CC62(DutyCycle);
+    /* Enable shadow transfer for T12 */
+    CCU6_EnableST_T12();						// Definition below : 
+    /* Save new duty cycle */
+    Emo_Ctrl.DutyCycle = DutyCycle;
+  }
+} /* End of Emo_CtrlSpeed */
+--------------------------------------------------------------------------------
+
+
+
+Below function is to calculate the duty cycle using PID algorithm, considering the present speed and the target speed. 
+First argument is the structure variable of the type "TMat_Pi", description below. 2nd variable is the error in the speed(diff in requested speed and present speed.) Requested speed is taken from some ADC.
+--------------------------------------------------------------------------------
+DutyCycle = (uint16)Mat_ExePi(&Emo_Ctrl.SpeedPi, Emo_Ctrl.UserRefSpeed - (sint16)Emo_GetAbsSpeed());	
+
+typedef struct
+{
+  sint16 UserRefSpeed;  /**< \brief User reference speed [rpm] */
+  TMat_Pi SpeedPi;      /**< \brief Speed PI control */
+  uint16 DutyCycle;     /**< \brief Duty cycle [PWM timer ticks] */
+} TEmo_Ctrl;
+   
+typedef struct
+{
+  sint32 IOut;     /**< \brief I output */
+  sint16 Kp;       /**< \brief Proportional parameter */
+  sint16 Ki;       /**< \brief Integral parameter */
+  sint16 IMin;     /**< \brief Minimum for I output */
+  sint16 IMax;     /**< \brief Maximum for I output */
+  sint16 PiMin;    /**< \brief Minimum for PI output */
+  sint16 PiMax;    /**< \brief Maximum for PI output */
+} TMat_Pi;
+
+
+__STATIC_INLINE sint16 Mat_ExePi(TMat_Pi *pPi, sint16 Error)
+{
+  sint32 IOut;
+  sint32 PiOut;
+  sint32 Min;
+  sint32 Max;
+  sint32 Temp;
+  /* I output = old output + error * I parameter */
+  IOut = pPi->IOut + ((sint32)Error * (sint32)pPi->Ki);		// Iout is found by adding previous value of Output and Present Error multiplied by Ki.
+								// So this seems to be the integral element.
+  /* Limit I output */
+  Min = ((sint32)(pPi->IMin)) << 15u;				// Pi Min value is shifted 15 times, can be also said that got multiplied by 32k...
+
+  if (IOut < Min)						// If Iout is < Min,
+  {
+    IOut = Min;							// Make Iout equal to Min.
+  }
+  else
+  {
+    Max = ((sint32)(pPi->IMax)) << 15u;				// Max value is left shifted by 15.
+
+    if (IOut > Max)						// If I out is greater than max,
+    {
+      IOut = Max;						// Iout is made equal to max.
+    }
+  }
+
+  /* Store I output */
+  pPi->IOut = IOut;						// Present values of the Pi Iout are saved in the structure variable.
+
+  /* PI output = upper half of (I output + saturate(error * P parameter) * 64) */
+  Temp = __SSAT(Error * ((sint32)pPi->Kp), 31u - 6u);		// Error is multiplied by Kp and saturated to 2^25 signed value.
+								// Note : Saturation means that, the value go outside the range of signed 2^25 value or it 								// will be clipped. 
+  PiOut = (IOut + (Temp << 6u)) >> 15u;				// We add the Proportional value in the present output value and then left shift it 15 									// times.
+  /* Limit PI output */
+  Min = (sint32)(pPi->PiMin);					//Min value is fetched from the structure. It has come based on GUI. // Value is 8.
+
+  if (PiOut < Min)						// If PiOut is less than Min, we clamp it with Min value.
+  {
+    PiOut = Min;
+  }
+  else
+  {
+    Max = (sint32)(pPi->PiMax);					// Max value is fetched from GUI, which is 75.
+
+    if (PiOut > Max)						// Piout is clamped with max value.
+    {
+      PiOut = Max;
+    }
+  }
+
+  return (sint16)PiOut;						// return Piout value.
+} /* End of Mat_ExePi */
+--------------------------------------------------------------------------------
+
+
+
+
+--------------------------------------------------------------------------------
+INLINE void CCU6_LoadShadowRegister_CC60(uint16 tick)
+{
+  CCU6_Ch0_Value_Set(tick);					// Definition below : In this case the register is "CC60SR" which only contains the value of 								// the duty time in 16bits data.
+
+}
+--------------------------------------------------------------------------------
+
+
+In this case the register is "CC60SR" which only contains the value of the duty time in 16bits data.
+--------------------------------------------------------------------------------
+INLINE void CCU6_Ch0_Value_Set(uint16 cc60sr)
+{
+  Field_Wrt16(&CCU6->CC60SR.reg, (uint16)CCU6_CC60R_CCV_Pos, (uint16)CCU6_CC60R_CCV_Msk, cc60sr);	//Definition above.
+}
+--------------------------------------------------------------------------------
+
+
+
+--------------------------------------------------------------------------------
+INLINE void CCU6_EnableST_T12(void)
+{
+  CCU6_T12_Str_En();						// Definition below.
+}
+--------------------------------------------------------------------------------
+
+
+Register is "TCTR4" and "CCU6_TCTR4_T12STR_Pos" is 6, which is the shadow transfer request bit.
+--------------------------------------------------------------------------------
+INLINE void CCU6_T12_Str_En(void)
+{
+  Field_Wrt16(&CCU6->TCTR4.reg, (uint16)CCU6_TCTR4_T12STR_Pos, (uint16)CCU6_TCTR4_T12STR_Msk, 1u);
+}
+--------------------------------------------------------------------------------
